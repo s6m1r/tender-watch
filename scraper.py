@@ -17,42 +17,59 @@ except Exception:
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-MIN_DAYS_LEFT = 7        # حداقل روز باقی‌مانده برای ارسال
-MAX_PAGES = 25           # حداکثر صفحه‌ای که هر بار بررسی می‌شود
-MAX_OPEN_IN_MSG = 8      # حداکثر مناقصه با مهلت باز در هر پیام
-MAX_UNKNOWN_IN_MSG = 5   # حداکثر موارد بدون مهلت مشخص
-SEEN_FILE = "seen.json"  # برای جلوگیری از ارسال تکراری
+MIN_DAYS_LEFT = 7
+MAX_PAGES = 40
+MAX_LINKS_PER_SITE = 6
+MAX_SUB_LINKS = 4
+MAX_OPEN_IN_MSG = 8
+MAX_UNKNOWN_IN_MSG = 6
+SEEN_FILE = "seen.json"
 
-SITEMAP_URLS = [
-    "https://setadiran.ir/sitemap.xml",
-    "https://setadiran.ir/sitemap_index.xml",
-    "https://setadiran.ir/fa/sitemap.xml",
-    "https://www.iooc.co.ir/sitemap.xml",
-    "https://iooc.co.ir/sitemap.xml",
-    "https://www.nioc.ir/sitemap.xml",
-    "https://nioc.ir/sitemap.xml",
-    "https://www.nigc.ir/sitemap.xml",
-    "https://nigc.ir/sitemap.xml",
-    "https://www.niordc.ir/sitemap.xml",
-    "https://niordc.ir/sitemap.xml",
-    "https://www.nipc.ir/sitemap.xml",
-    "https://nipc.ir/sitemap.xml",
-    "https://www.nisoc.ir/sitemap.xml",
-    "https://nisoc.ir/sitemap.xml",
-    "https://www.pogc.ir/sitemap.xml",
-    "https://pogc.ir/sitemap.xml",
-    "https://www.ppars.ir/sitemap.xml",
-    "https://ppars.ir/sitemap.xml",
+SITES = [
+    "https://setadiran.ir",
+    "https://www.nioc.ir",
+    "https://www.nigc.ir",
+    "https://www.niordc.ir",
+    "https://www.nipc.ir",
+    "https://www.nisoc.ir",
+    "https://www.iooc.co.ir",
+    "https://www.pogc.ir",
+    "https://www.ppars.ir",
+]
+
+SITEMAP_URLS = []
+for s in SITES:
+    SITEMAP_URLS += [f"{s}/sitemap.xml", f"{s}/sitemap_index.xml", f"{s}/fa/sitemap.xml"]
+
+# 🔍 جستجوهایی که مستقیم توی داک‌داک‌گو زده میشن (لینک مستقیم برمی‌گردونن)
+DDG_QUERIES = [
+    "site:setadiran.ir مناقصه",
+    "site:setadiran.ir مزایده",
+    "site:setadiran.ir آگهی",
+    "site:nioc.ir مناقصه",
+    "site:nigc.ir مناقصه",
+    "site:niordc.ir مناقصه",
+    "site:nisoc.ir مناقصه",
+    "site:iooc.co.ir مناقصه",
+    "site:pogc.ir مناقصه",
+    "مناقصه نفت",
 ]
 
 TENDER_URL_KEYWORDS = [
-    "tender", "monaghese", "mozayede", "agahi", "forookh",
-    "مناقصه", "مزایده", "آگهی", "فراخوان", "استعلام",
+    "tender", "monaghese", "mozayede", "agahi", "forookh", "estelam",
+    "مناقصه", "مزایده", "آگهی", "فراخوان", "استعلام", "خریداری",
 ]
+
+MONTH_NAMES = {
+    "فروردین": 1, "اردیبهشت": 2, "خرداد": 3, "تیر": 4,
+    "مرداد": 5, "امرداد": 5, "شهریور": 6, "مهر": 7, "آبان": 8,
+    "آذر": 9, "اذر": 9, "دی": 10, "بهمن": 11, "اسفند": 12,
+}
+MONTH_RE = "فروردین|اردیبهشت|خرداد|تیر|مرداد|امرداد|شهریور|مهر|آبان|آذر|اذر|دی|بهمن|اسفند"
 
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
-# ---------- تبدیل تاریخ شمسی/میلادی ----------
+# ---------- تبدیل تاریخ ----------
 
 def jalali_to_gregorian(jy, jm, jd):
     jy += 1595
@@ -114,14 +131,19 @@ def jalali_safe(y, m, d):
             return None
     return None
 
-# ---------- دریافت و پردازش صفحه ----------
+# ---------- ابزارها ----------
 
-def fetch_bytes(url, timeout=20):
+def normalize_text(s):
+    s = s.translate(_DIGITS)
+    s = s.replace("ي", "ی").replace("ك", "ک").replace("\u200c", " ")
+    return re.sub(r"\s+", " ", s)
+
+def fetch_bytes(url, timeout=25):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
-def fetch_text(url, timeout=20):
+def fetch_text(url, timeout=25):
     data = fetch_bytes(url, timeout)
     for enc in ("utf-8", "cp1256"):
         try:
@@ -133,46 +155,112 @@ def fetch_text(url, timeout=20):
 def html_to_text(html):
     html = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
     text = re.sub(r"<[^>]+>", " ", html)
-    text = text.translate(_DIGITS)
-    return re.sub(r"\s+", " ", text)
+    return normalize_text(text)
 
 def get_title(html, fallback=""):
     m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
     if m:
-        t = re.sub(r"\s+", " ", m.group(1)).strip()
+        t = normalize_text(m.group(1)).strip()
         if t:
             return t
     return fallback
 
-def extract_dates(text):
-    out = []
-    # شمسی: 1405/08/05
-    for m in re.finditer(r"\b(1[3-5]\d{2})[/\.\-](\d{1,2})[/\.\-](\d{1,2})\b", text):
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        g = jalali_safe(y, mo, d)
-        if g:
-            out.append((m.start(), g, f"{y}/{mo:02d}/{d:02d}"))
-    # شمسی: 05/08/1405
-    for m in re.finditer(r"\b(\d{1,2})[/](\d{1,2})[/](1[3-5]\d{2})\b", text):
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        g = jalali_safe(y, mo, d)
-        if g:
-            out.append((m.start(), g, f"{y}/{mo:02d}/{d:02d}"))
-    # میلادی: 2026-11-01
-    for m in re.finditer(r"\b(20[2-9]\d)[/\-\.](\d{1,2})[/\-\.](\d{1,2})\b", text):
-        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+def keyword_hit(s):
+    s = normalize_text(s).lower()
+    return any(k in s for k in TENDER_URL_KEYWORDS)
+
+# ---------- جستجوی DuckDuckGo ----------
+
+def duck_search(query, limit=10):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
+    }
+    for endpoint in ("https://html.duckduckgo.com/html/",
+                     "https://lite.duckduckgo.com/lite/"):
         try:
-            out.append((m.start(), datetime(y, mo, d).date(), f"{y}/{mo:02d}/{d:02d}"))
+            url = endpoint + "?" + urllib.parse.urlencode({"q": query})
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                html = resp.read().decode("utf-8", "ignore")
+        except Exception as e:
+            print(f"   ❌ DDG ({endpoint}): {e}")
+            continue
+
+        results = []
+        for m in re.finditer(r'<a\s+([^>]+)>(.*?)</a>', html, re.S | re.I):
+            attrs, inner = m.group(1), m.group(2)
+            if "result__a" not in attrs and "result-link" not in attrs:
+                continue
+            hm = re.search(r'href="([^"]+)"', attrs)
+            if not hm:
+                continue
+            href = hm.group(1)
+            if "uddg=" in href:
+                qs = urllib.parse.urlparse(href).query
+                href = urllib.parse.parse_qs(qs).get("uddg", [href])[0]
+            if not href.startswith("http"):
+                continue
+            title = normalize_text(re.sub(r"<[^>]+>", " ", inner)).strip()
+            results.append({"title": title, "link": href})
+            if len(results) >= limit:
+                break
+
+        uniq, seen = [], set()
+        for r in results:
+            if r["link"] not in seen:
+                seen.add(r["link"])
+                uniq.append(r)
+        if uniq:
+            return uniq
+    return []
+
+# ---------- استخراج تاریخ ----------
+
+def extract_dates(text, today):
+    out = []
+    jy_now = gregorian_to_jalali(today.year, today.month, today.day)[0]
+
+    for m in re.finditer(r"\b(1[3-5]\d{2})\s*[/\.\-]\s*(\d{1,2})\s*[/\.\-]\s*(\d{1,2})\b", text):
+        g = jalali_safe(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if g:
+            out.append((m.start(), g, f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"))
+
+    for m in re.finditer(r"\b(\d{1,2})\s*[/]\s*(\d{1,2})\s*[/]\s*(1[3-5]\d{2})\b", text):
+        g = jalali_safe(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        if g:
+            out.append((m.start(), g, f"{m.group(3)}/{int(m.group(2)):02d}/{int(m.group(1)):02d}"))
+
+    for m in re.finditer(r"\b(20[2-9]\d)\s*[/\.\-]\s*(\d{1,2})\s*[/\.\-]\s*(\d{1,2})\b", text):
+        try:
+            out.append((m.start(), datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date(),
+                        f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"))
         except ValueError:
             pass
+
+    pat = rf"\b(\d{{1,2}})\s*(?:روز)?\s*(?:ماه)?\s*({MONTH_RE})(?:ماه)?\s*(1[3-5]\d{{2}})?\b"
+    for m in re.finditer(pat, text):
+        d = int(m.group(1))
+        mo = MONTH_NAMES[m.group(2)]
+        y = int(m.group(3)) if m.group(3) else jy_now
+        g = jalali_safe(y, mo, d)
+        if g:
+            out.append((m.start(), g, f"{y}/{mo:02d}/{d:02d}"))
+
+    for m in re.finditer(r"(?:مهلت|موعد|ضرب)\D{0,30}?(\d{1,3})\s*روز", text):
+        n = int(m.group(1))
+        if 1 <= n <= 180:
+            out.append((m.start(), today + timedelta(days=n), f"{n} روز بعد"))
+
     return out
 
 def find_deadline(text, today):
-    """مهلت احتمالی را پیدا می‌کند؛ اولویت با تاریخ‌های نزدیک کلمه «مهلت»"""
-    dates = extract_dates(text)
+    dates = extract_dates(text, today)
     if not dates:
-        return None
-    hints = [m.start() for m in re.finditer("مهلت|ضرب|موعد", text)]
+        return None, 0
+    hints = [m.start() for m in re.finditer("مهلت|ضرب|موعد|تحویل", text)]
 
     def score(item):
         pos, d, _ = item
@@ -182,28 +270,12 @@ def find_deadline(text, today):
     future = [c for c in dates if (c[1] - today).days >= 0]
     pool = future if future else dates
     best = max(pool, key=score)
-    return best[1], best[2]
+    return (best[1], best[2]), len(dates)
 
 # ---------- منابع ----------
 
-def search_news(query):
-    query_encoded = urllib.parse.quote(query)
-    url = f"https://news.google.com/rss/search?q={query_encoded}&hl=fa&gl=IR&ceid=IR:fa"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=15) as response:
-        data = response.read()
-    root = ET.fromstring(data)
-    items = []
-    for item in root.findall(".//item"):
-        items.append({
-            "title": item.findtext("title") or "",
-            "link": item.findtext("link") or "",
-        })
-    return items
-
 def collect_sitemap_urls(limit=15):
-    urls = []
-    seen_sm = set()
+    urls, seen_sm = [], set()
     queue = list(SITEMAP_URLS)
     while queue and len(urls) < limit:
         sm = queue.pop(0)
@@ -217,150 +289,121 @@ def collect_sitemap_urls(limit=15):
             pages = [u for u in locs if u not in sub]
             queue.extend(sub)
             for u in pages:
-                if any(k in u.lower() for k in TENDER_URL_KEYWORDS) and u not in urls:
+                if keyword_hit(u) and u not in urls:
                     urls.append(u)
                     if len(urls) >= limit:
                         break
-        except Exception as e:
-            print(f"   ❌ sitemap: {sm} → {e}")
+        except Exception:
+            pass
     return urls
 
-# ---------- حافظه (جلوگیری از تکرار) ----------
+A_TAG = re.compile(r'<a\b[^>]*?href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
 
-def load_seen():
-    try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def extract_anchor_links(html, base):
+    res = []
+    for m in A_TAG.finditer(html):
+        href = m.group(1).strip()
+        if href.lower().startswith(("javascript", "#", "mailto", "tel")):
+            continue
+        full = urllib.parse.urljoin(base, href)
+        if not full.startswith("http"):
+            continue
+        label = normalize_text(re.sub(r"<[^>]+>", " ", m.group(2))).strip()
+        res.append((full, label))
+    return res
 
-def save_seen(seen):
-    items = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:500]
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(dict(items), f, ensure_ascii=False, indent=1)
-
-# ---------- پیام تلگرام ----------
-
-def send_telegram(message):
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    try:
-        requests.post(api_url, data=data, timeout=15)
-        print("✅ پیام ارسال شد.")
-    except Exception as e:
-        print(f"❌ خطا در ارسال تلگرام: {e}")
-
-def build_message(today, open_list, unknown_list):
-    jy, jm, jd = gregorian_to_jalali(today.year, today.month, today.day)
-    lines = [f"📅 امروز: {jy}/{jm:02d}/{jd:02d}", ""]
-    if open_list:
-        lines.append(f"✅ مناقصات با مهلت باز ({MIN_DAYS_LEFT} روز یا بیشتر):")
-        lines.append("")
-        for i, t in enumerate(open_list[:MAX_OPEN_IN_MSG], 1):
-            lines.append(f"{i}) {t['title']}")
-            lines.append(f"🔗 {t['link']}")
-            lines.append(f"⏳ مهلت: {t['deadline']} ({t['left']} روز مانده)")
-            lines.append("")
-    if unknown_list:
-        lines.append("🟡 مهلتش پیدا نشد (خودت بررسی کن):")
-        for t in unknown_list[:MAX_UNKNOWN_IN_MSG]:
-            lines.append(f"• {t['title']}")
-            lines.append(f"  {t['link']}")
-        lines.append("")
-    msg = "\n".join(lines).strip()
-    if len(msg) > 3900:
-        msg = msg[:3900] + "\n…"
-    return msg
-
-# ---------- اجرای اصلی ----------
-
-def main():
-    today = datetime.now(TEHRAN).date()
-    seen = load_seen()
-
-    candidates = []
-    for u in collect_sitemap_urls():
-        candidates.append({"title": "", "link": u})
-
-    queries = [
-        "مناقصه نفت",
-        "مزایده نفت و گاز",
-        "مناقصه پتروشیمی",
-        "مناقصه گاز",
-        "مناقصه فناوری اطلاعات",
-    ]
-    site_queries = [
-        "site:setadiran.ir مناقصه",
-        "site:setadiran.ir مزایده",
-        "site:nioc.ir مناقصه",
-        "site:nioc.ir مزایده",
-        "site:nigc.ir مناقصه",
-        "site:nigc.ir مزایده",
-        "site:niordc.ir مناقصه",
-        "site:nipc.ir مناقصه",
-        "site:nisoc.ir مناقصه",
-        "site:iooc.co.ir مناقصه",
-        "site:pogc.ir مناقصه",
-        "site:ppars.ir مناقصه",
-    ]
-    for q in queries + site_queries:
+def collect_from_sites():
+    found = []
+    for site in SITES:
         try:
-            candidates.extend(search_news(q))
+            html = fetch_text(site + "/")
         except Exception as e:
-            print(f"   ❌ جستجو: {q} → {e}")
+            print(f"   🌐 {site} → در دسترس نیست ({e})")
+            continue
+        links = extract_anchor_links(html, site)
+        hits = [(u, t) for u, t in links if keyword_hit(u) or keyword_hit(t)]
+        print(f"   🌐 {site}: {len(hits)} لینک مرتبط در صفحه اول")
+        for u, t in hits[:MAX_LINKS_PER_SITE]:
+            found.append({"title": t, "link": u})
+    return found
 
-    # حذف تکراری‌ها بر اساس لینک
-    uniq, seen_urls = [], set()
-    for c in candidates:
-        u = c.get("link")
-        if u and u not in seen_urls:
-            seen_urls.add(u)
-            uniq.append(c)
+# ---------- تحلیل ----------
 
+def analyze(candidates, today, seen):
     open_list, unknown_list, skipped, checked = [], [], 0, 0
-    for it in uniq:
+    for it in candidates:
         if checked >= MAX_PAGES:
             break
         url = it.get("link") or ""
         if not url or url in seen:
             continue
-        if url.lower().endswith(".pdf"):
+        if ".pdf" in url.lower():
             seen[url] = today.isoformat()
             continue
         try:
             html = fetch_text(url)
         except Exception as e:
-            print(f"   ⚠️ دریافت نشد: {url} → {e}")
+            print(f"   ⚠️ {url} → {e}")
+            continue
+        text = html_to_text(html)
+        if len(text) < 400:
+            seen[url] = today.isoformat()
             continue
         checked += 1
-        title = get_title(html) or it.get("title") or url
-        dl = find_deadline(html_to_text(html), today)
+        title = get_title(html, fallback=it.get("title") or url)
+        (d, label), ndates = find_deadline(text, today)
+        print(f"   📄 {checked}. {title[:60]} | تاریخ‌ها: {ndates} | مهلت: {label} ({(d-today).days if d else '-'} روز)")
+
+        if d is not None and (d - today).days >= MIN_DAYS_LEFT:
+            open_list.append({"title": title, "link": url, "deadline": label, "left": (d - today).days})
+            seen[url] = today.isoformat()
+            time.sleep(0.7)
+            continue
+
+        if d is not None:
+            skipped += 1
+            seen[url] = today.isoformat()
+            time.sleep(0.7)
+            continue
+
+        # صفحه فهرست؟ یک لایه عمیق‌تر
+        sub = [(u, t) for u, t in extract_anchor_links(html, url)
+               if (keyword_hit(u) or keyword_hit(t)) and u not in seen][:MAX_SUB_LINKS]
         seen[url] = today.isoformat()
-        if dl:
-            d, label = dl
-            left = (d - today).days
-            if left >= MIN_DAYS_LEFT:
-                open_list.append({"title": title, "link": url, "deadline": label, "left": left})
-            else:
-                skipped += 1
+        if sub:
+            for su, st in sub:
+                if checked >= MAX_PAGES:
+                    break
+                if ".pdf" in su.lower():
+                    continue
+                try:
+                    shtml = fetch_text(su)
+                except Exception:
+                    continue
+                stext = html_to_text(shtml)
+                if len(stext) < 400:
+                    seen[su] = today.isoformat()
+                    continue
+                checked += 1
+                stitle = get_title(shtml, fallback=st or su)
+                (sd, slabel), _ = find_deadline(stext, today)
+                print(f"      ↳ {checked}. {stitle[:55]} | مهلت: {slabel if sd else '-'}")
+                seen[su] = today.isoformat()
+                if sd:
+                    left = (sd - today).days
+                    if left >= MIN_DAYS_LEFT:
+                        open_list.append({"title": stitle, "link": su, "deadline": slabel, "left": left})
+                    else:
+                        skipped += 1
+                else:
+                    unknown_list.append({"title": stitle, "link": su})
+                time.sleep(0.5)
         else:
             unknown_list.append({"title": title, "link": url})
         time.sleep(0.7)
+    return open_list, unknown_list, skipped, checked
 
-    save_seen(seen)
+# ---------- پیام ----------
 
-    if open_list or unknown_list:
-        msg = build_message(today, open_list, unknown_list)
-        if skipped:
-            msg += f"\n\n🗑 {skipped} مورد با مهلت کمتر از {MIN_DAYS_LEFT} روز حذف شد."
-        send_telegram(msg)
-    else:
-        base = "🔍 امروز مناقصه جدیدی پیدا نشد."
-        if skipped:
-            base += f"\n({skipped} مورد هم مهلتش کمتر از {MIN_DAYS_LEFT} روز بود و حذف شد.)"
-        send_telegram(base)
-
-    print(f"بررسی‌شده: {checked} | باز: {len(open_list)} | نامشخص: {len(unknown_list)} | حذف‌شده: {skipped}")
-
-if __name__ == "__main__":
-    main()
+def send_telegram(message):
+    api_url = f"https://api.telegram.org/bot{TELEGRA
